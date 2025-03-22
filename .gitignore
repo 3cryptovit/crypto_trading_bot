@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Virtual environment
+venv/
+
+# Environment variables
+.env
+
+# Logs
+*.log
+
+# JSON файлы с чувствительными или временными данными
+balance.json
+pnl.json
+positions.json
+price.json
+signals.json
+
+# IDE settings
+.vscode/
+.idea/
+
+# MacOS files
+.DS_Store
