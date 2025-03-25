@@ -507,15 +507,19 @@ class BybitAPI:
             return None
 
     async def get_latest_price(self):
-        """Получение последней цены тикера"""
+        """Получает последнюю цену"""
         try:
-            result = await self.get_tickers(category="linear", symbol=SYMBOL)
-            if result and "result" in result and "list" in result["result"]:
-                price = float(result["result"]["list"][0]["lastPrice"])
+            tickers = await self.api.get_tickers(category="linear", symbol=SYMBOL)
+            if tickers and "result" in tickers and "list" in tickers["result"]:
+                price = float(tickers["result"]["list"][0]["lastPrice"])
+                # Сохраняем цену в price.json
+                price_data = {"price": price, "last_updated": datetime.now().isoformat()}
+                if update_json_file("price.json", price_data):
+                    logging.info(f"✅ Цена успешно обновлена: {price}")
+                else:
+                    logging.error("❌ Ошибка при сохранении цены в JSON")
                 return price
-            else:
-                logging.error("Не удалось получить последнюю цену.")
-                return None
+            return None
         except Exception as e:
             logging.error(f"Ошибка при получении цены: {e}")
             return None
@@ -740,6 +744,7 @@ class TradingBot:
             
             # Обновляем баланс каждые 5 минут
             if current_time - self.last_positions_update >= 300:
+                logging.info("🔄 Начинаем обновление баланса...")
                 balance_info = await self.api.get_wallet_balance(accountType="UNIFIED")
                 logging.info(f"📊 Ответ API get_wallet_balance: {balance_info}")
 
@@ -791,9 +796,9 @@ class TradingBot:
                             }
                             
                             if update_json_file("balance.json", balance_data):
-                                logging.info(f"✅ Баланс успешно обновлен: {balance_data}")
+                                logging.info(f"✅ balance.json обновлен: {balance_data}")
                             else:
-                                logging.error("❌ Ошибка при записи баланса в файл")
+                                logging.error("❌ Ошибка при записи balance.json")
                         except (ValueError, TypeError) as e:
                             logging.error(f"❌ Ошибка при преобразовании данных баланса: {e}")
                     else:
@@ -803,41 +808,54 @@ class TradingBot:
             
             # Обновляем позиции каждые 60 секунд
             if current_time - self.last_positions_update >= 60:
+                logging.info("🔄 Начинаем обновление позиций...")
                 positions = await self.api.get_positions(category="linear", symbol=SYMBOL)
                 if positions and positions.get("result", {}).get("list"):
                     self.positions = positions["result"]["list"][0]
                     self.last_positions_update = current_time
-                    logging.info("✅ Позиции успешно обновлены")
+                    logging.info(f"📊 Получены позиции: {self.positions}")
                     
                     # Сохраняем в JSON
                     if update_json_file("positions.json", {"positions": self.positions}):
-                        logging.info("✅ Позиции сохранены в JSON")
+                        logging.info("✅ positions.json обновлен")
                     else:
-                        logging.error("❌ Ошибка при сохранении позиций в JSON")
+                        logging.error("❌ Ошибка при сохранении positions.json")
             
             # Обновляем PnL каждые 300 секунд
             if current_time - self.last_pnl_update >= 300:
+                logging.info("🔄 Начинаем обновление PnL...")
                 pnl = await self.api.get_closed_pnl(category="linear", symbol=SYMBOL)
                 if pnl and pnl.get("result", {}).get("list"):
                     self.pnl_data["trades"] = pnl["result"]["list"]
                     self.pnl_data["daily_pnl"] = sum(float(trade["closedPnl"]) for trade in pnl["result"]["list"])
                     self.last_pnl_update = current_time
-                    logging.info("✅ PnL данные успешно обновлены")
+                    logging.info(f"📊 Обновлен PnL: {self.pnl_data}")
                     
                     # Сохраняем в JSON
                     if update_json_file("pnl.json", self.pnl_data):
-                        logging.info("✅ PnL данные сохранены в JSON")
+                        logging.info("✅ pnl.json обновлен")
                     else:
-                        logging.error("❌ Ошибка при сохранении PnL данных в JSON")
+                        logging.error("❌ Ошибка при сохранении pnl.json")
+            
+            # Обновляем цену каждые 5 секунд
+            logging.info("🔄 Начинаем обновление цены...")
+            price = await self.api.get_latest_price()
+            if price:
+                price_data = {"price": price, "last_updated": datetime.now().isoformat()}
+                if update_json_file("price.json", price_data):
+                    logging.info(f"✅ price.json обновлен: {price}")
+                else:
+                    logging.error("❌ Ошибка при сохранении price.json")
             
             # Обновляем сигналы
             if self.signals["refresh_data"]:
+                logging.info("🔄 Начинаем обновление сигналов...")
                 self.signals["refresh_data"] = False
                 self.signals["last_updated"] = datetime.now().isoformat()
                 if update_json_file("signals.json", self.signals):
-                    logging.info("✅ Сигналы успешно обновлены")
+                    logging.info("✅ signals.json обновлен")
                 else:
-                    logging.error("❌ Ошибка при обновлении сигналов")
+                    logging.error("❌ Ошибка при обновлении signals.json")
                     
         except Exception as e:
             logging.error(f"❌ Ошибка при обновлении данных: {str(e)}")
@@ -1418,64 +1436,36 @@ class TradingBot:
             logging.error(f"Ошибка при расчете VWAP: {e}")
             return None
 
-    async def calculate_position_size(self, stop_loss_price, entry_price):
+    async def calculate_position_size(self, account_balance, current_price, atr):
         """
-        Рассчитывает размер позиции с учетом риска и минимального размера
+        Рассчитывает размер позиции на основе риска 1% от баланса
         """
         try:
-            # Получаем баланс аккаунта
-            account_info = await self.api.get_wallet_balance(accountType="UNIFIED")
-            if "result" not in account_info or "list" not in account_info["result"]:
-                logging.error("Не удалось получить информацию о балансе")
+            if not account_balance or not current_price or not atr:
                 return None
 
-            # Получаем доступный баланс USDT
-            available_balance = None
-            for coin in account_info["result"]["list"][0].get("coin", []):
-                if coin["coin"].upper() == "USDT":
-                    available_balance = float(coin["availableBalance"])
-                    break
-
-            if available_balance is None:
-                logging.error("Не удалось получить баланс USDT")
-                return None
-
-            # Рассчитываем риск в USDT
-            risk_amount = available_balance * (RISK_PERCENTAGE / 100)
-
-            # Рассчитываем расстояние до стоп-лосса
-            stop_loss_distance = abs(entry_price - stop_loss_price)
-
-            if stop_loss_distance == 0:
-                logging.error("Ошибка: стоп-лосс равен нулю.")
-                return None
-
-            # Рассчитываем размер позиции с учетом плеча
-            position_size = (risk_amount * LEVERAGE) / stop_loss_distance
-
-            # Получаем минимальный размер позиции для текущей пары
-            min_size = MIN_POSITION_SIZES.get(SYMBOL, 0.001)
+            # Рассчитываем максимальный риск в долларах (1% от баланса)
+            risk_amount = account_balance * 0.01
             
-            # Проверяем, достаточен ли размер позиции
+            # Рассчитываем размер позиции на основе ATR
+            # Используем 0.5 ATR как стоп-лосс
+            stop_distance = atr * 0.5
+            
+            # Рассчитываем размер позиции
+            position_size = risk_amount / stop_distance
+            
+            # Округляем размер до 2 знаков после запятой
+            position_size = round(position_size, 2)
+            
+            # Проверяем минимальный размер позиции
+            min_size = 0.01
             if position_size < min_size:
-                error_msg = f"Недостаточно средств для минимальной позиции. Требуется минимум {min_size} {SYMBOL}"
-                logging.warning(error_msg)
-                await send_telegram_message(f"⚠️ {error_msg}")
-                return None
-
-            # Округляем размер позиции до допустимого значения
-            # Для BTC и ETH используем 3 знака после запятой, для остальных - 2
-            if SYMBOL in ["BTCUSDT", "ETHUSDT"]:
-                position_size = round(position_size, 3)
-            else:
-                position_size = round(position_size, 2)
-
-            return position_size if position_size >= min_size else None
+                position_size = min_size
+                
+            return position_size
 
         except Exception as e:
-            error_msg = f"Ошибка при расчете размера позиции: {e}"
-            logging.error(error_msg)
-            await send_telegram_message(f"⚠️ {error_msg}")
+            logging.error(f"Ошибка при расчете размера позиции: {e}")
             return None
 
     TIMEFRAME_MAPPING = {
@@ -1813,37 +1803,458 @@ class TradingBot:
             await send_telegram_message(f"⚠️ Ошибка в мониторинге позиций: {e}")
 
     async def monitor_positions(self):
-        """Мониторит позиции и ордера"""
-        while True:
-            try:
-                # Получаем историю ордеров
-                orders = self.session.get_order_history(
-                    category="linear",
-                    symbol=SYMBOL,
-                    limit=50
-                )
+        """
+        Мониторит открытые позиции и управляет трейлинг-стопом и частичным закрытием
+        """
+        try:
+            # Получаем текущие индикаторы
+            indicators = await self.calculate_indicators()
+            if not indicators:
+                return
+
+            current_price = float(indicators['last_close'])
+            atr = float(indicators['ATR'][-1])
+
+            # Получаем открытые позиции
+            positions = read_json_file('positions.json')
+            if not positions:
+                return
+
+            # Если positions это словарь, преобразуем в список
+            if isinstance(positions, dict):
+                positions = [positions]
+
+            for position in positions:
+                try:
+                    # Проверяем частичное закрытие
+                    close_size = await self.partial_close_position(position, current_price, atr)
+                    if close_size:
+                        # Закрываем часть позиции
+                        order = await self.api.place_order(
+                            category="linear",
+                            symbol=SYMBOL,
+                            side="Sell" if position['side'] == "Buy" else "Buy",
+                            orderType="Market",
+                            qty=str(close_size)
+                        )
+
+                        if "result" in order:
+                            # Обновляем размер позиции
+                            position['size'] = float(position['size']) - close_size
+                            if position['size'] <= 0:
+                                positions.remove(position)
+                            else:
+                                # Обновляем тейк-профиты для оставшейся части
+                                sl_tp = await self.calculate_sl_tp(position['side'], current_price, atr)
+                                if sl_tp:
+                                    position['stopLoss'] = sl_tp['stop_loss']
+                                    position['takeProfit1'] = sl_tp['take_profit_1']
+                                    position['takeProfit2'] = sl_tp['take_profit_2']
+                                    position['takeProfit3'] = sl_tp['take_profit_3']
+
+                                # Обновляем positions.json
+                                update_json_file('positions.json', positions)
+
+                                # Отправляем уведомление
+                                message = f"🔄 Частично закрыта {position['side']} позиция:\n"
+                                message += f"Закрыто: {close_size}\n"
+                                message += f"Осталось: {position['size']}\n"
+                                message += f"Цена: {current_price}"
+                                await send_telegram_message(message)
+
+                    # Проверяем трейлинг-стоп
+                    new_stop = await self.update_trailing_stop(position, current_price, atr)
+                    if new_stop and new_stop != position['stopLoss']:
+                        # Обновляем стоп-лосс
+                        await self.api.set_stop_loss(
+                            category="linear",
+                            symbol=SYMBOL,
+                            stopLoss=str(new_stop)
+                        )
+                        position['stopLoss'] = new_stop
+                        update_json_file('positions.json', positions)
+
+                        # Отправляем уведомление
+                        message = f"📈 Обновлен трейлинг-стоп для {position['side']} позиции:\n"
+                        message += f"Новый стоп: {new_stop}\n"
+                        message += f"Текущая цена: {current_price}"
+                        await send_telegram_message(message)
+
+                except Exception as e:
+                    logging.error(f"Ошибка при мониторинге позиции: {e}")
+                    continue
+
+        except Exception as e:
+            logging.error(f"Ошибка при мониторинге позиций: {e}")
+
+    async def calculate_indicators(self):
+        """
+        Рассчитывает все необходимые индикаторы для стратегии
+        """
+        try:
+            # Получаем свечи
+            candles = await self.api.get_kline(category="linear", symbol=SYMBOL, interval="5", limit=100)
+            if not candles or "result" not in candles or "list" not in candles["result"]:
+                logging.error("Неверный формат данных свечей")
+                return None
+
+            # Преобразуем данные в numpy массивы
+            closes = np.array([float(candle[4]) for candle in candles["result"]["list"]])
+            highs = np.array([float(candle[2]) for candle in candles["result"]["list"]])
+            lows = np.array([float(candle[3]) for candle in candles["result"]["list"]])
+            volumes = np.array([float(candle[5]) for candle in candles["result"]["list"]])
+
+            if len(closes) < 50:
+                logging.warning("Недостаточно данных для анализа")
+                return None
+
+            # Рассчитываем индикаторы
+            rsi = talib.RSI(closes, timeperiod=14)[-1]
+            atr = talib.ATR(highs, lows, closes, timeperiod=14)[-1]
+            
+            # Рассчитываем VWAP
+            typical_price = (highs + lows + closes) / 3
+            cumulative_vp = np.cumsum(typical_price * volumes)
+            cumulative_volume = np.cumsum(volumes)
+            vwap = cumulative_vp[-1] / cumulative_volume[-1]
+
+            # Рассчитываем SMA для определения тренда
+            sma20 = talib.SMA(closes, timeperiod=20)[-1]
+            sma50 = talib.SMA(closes, timeperiod=50)[-1]
+
+            # Рассчитываем уровни поддержки и сопротивления
+            support_resistance = await self.get_support_resistance(closes)
+
+            return {
+                'RSI': rsi,
+                'ATR': atr,
+                'VWAP': vwap,
+                'SMA20': sma20,
+                'SMA50': sma50,
+                'last_close': closes[-1],
+                'last_high': highs[-1],
+                'last_low': lows[-1],
+                'last_volume': volumes[-1],
+                'support_resistance': support_resistance
+            }
+
+        except Exception as e:
+            logging.error(f"Ошибка при расчете индикаторов: {e}")
+            return None
+
+    async def check_entry_conditions(self, indicators):
+        """
+        Проверяет условия для входа в позицию
+        """
+        try:
+            if not indicators:
+                return None
+
+            price = indicators['last_close']
+            vwap = indicators['VWAP']
+            rsi = indicators['RSI']
+            atr = indicators['ATR']
+            sma20 = indicators['SMA20']
+            sma50 = indicators['SMA50']
+            volume = await self.analyze_volume()
+
+            if not volume:
+                return None
+
+            # Проверяем условия для покупки
+            if (price > vwap and 
+                rsi < 65 and 
+                price > sma20 and 
+                sma20 > sma50 and 
+                volume == 'Buy'):
                 
-                # Проверяем исполненные ордера
-                if orders and 'list' in orders['result']:
-                    for order in orders['result']['list']:
-                        if order['status'] == 'Filled':
-                            logging.info(f"✅ Ордер исполнен: {order['orderId']}")
-                            # Обновляем сигналы
-                            signals = read_json_file('signals.json')
-                            signals['refresh_data'] = True
-                            update_json_file('signals.json', signals)
+                # Проверяем, не слишком ли близко к уровню сопротивления
+                if indicators['support_resistance']:
+                    resistance = indicators['support_resistance'].get('resistance', float('inf'))
+                    if price < resistance - atr:
+                        return 'Buy'
+
+            # Проверяем условия для продажи
+            if (price < vwap and 
+                rsi > 35 and 
+                price < sma20 and 
+                sma20 < sma50 and 
+                volume == 'Sell'):
                 
-                await asyncio.sleep(5)  # Проверяем каждые 5 секунд
+                # Проверяем, не слишком ли близко к уровню поддержки
+                if indicators['support_resistance']:
+                    support = indicators['support_resistance'].get('support', 0)
+                    if price > support + atr:
+                        return 'Sell'
+
+            return None
+
+        except Exception as e:
+            logging.error(f"Ошибка при проверке условий входа: {e}")
+            return None
+
+    async def calculate_sl_tp(self, side, price, atr):
+        """
+        Рассчитывает стоп-лосс и тейк-профиты на основе ATR
+        """
+        try:
+            if side == 'Buy':
+                # Стоп-лосс: минимум прошлой свечи или 0.5 ATR
+                stop_loss = price - atr * 0.5
                 
-            except Exception as e:
-                error_msg = f"Ошибка при мониторинге позиций: {str(e)}"
-                logging.error(error_msg)
-                await send_telegram_message(error_msg)
-                await asyncio.sleep(10)  # Ждем 10 секунд перед следующей попыткой
+                # Тейк-профиты: 1 ATR, 2 ATR и 3 ATR
+                take_profit_1 = price + atr
+                take_profit_2 = price + atr * 2
+                take_profit_3 = price + atr * 3
+                
+                # Проверяем минимальное расстояние для стоп-лосса
+                min_distance = MIN_STOP_DISTANCES.get(SYMBOL, 0.1)
+                min_stop_distance = price * (min_distance / 100)
+                if (price - stop_loss) < min_stop_distance:
+                    stop_loss = price - min_stop_distance
+                    
+            else:  # Sell
+                # Стоп-лосс: максимум прошлой свечи или 0.5 ATR
+                stop_loss = price + atr * 0.5
+                
+                # Тейк-профиты: 1 ATR, 2 ATR и 3 ATR
+                take_profit_1 = price - atr
+                take_profit_2 = price - atr * 2
+                take_profit_3 = price - atr * 3
+                
+                # Проверяем минимальное расстояние для стоп-лосса
+                min_distance = MIN_STOP_DISTANCES.get(SYMBOL, 0.1)
+                min_stop_distance = price * (min_distance / 100)
+                if (stop_loss - price) < min_stop_distance:
+                    stop_loss = price + min_stop_distance
+
+            return {
+                'stop_loss': stop_loss,
+                'take_profit_1': take_profit_1,
+                'take_profit_2': take_profit_2,
+                'take_profit_3': take_profit_3
+            }
+
+        except Exception as e:
+            logging.error(f"Ошибка при расчете SL/TP: {e}")
+            return None
+
+    async def update_trailing_stop(self, position, current_price, atr):
+        """
+        Обновляет трейлинг-стоп на основе текущей цены и ATR
+        """
+        try:
+            if not position or not current_price or not atr:
+                return None
+
+            # Получаем текущий стоп-лосс
+            current_stop = float(position.get('stopLoss', 0))
+            entry_price = float(position.get('entryPrice', 0))
+            unrealized_pnl = float(position.get('unrealisedPnl', 0))
+            
+            # Рассчитываем расстояние до стопа в ATR
+            if position['side'] == 'Buy':
+                distance_to_stop = (current_price - current_stop) / atr
+                # Если прибыль больше 0.75 ATR, двигаем стоп в безубыток
+                if distance_to_stop > 0.75:
+                    new_stop = entry_price
+                    if new_stop > current_stop:
+                        return new_stop
+            else:  # Sell
+                distance_to_stop = (current_stop - current_price) / atr
+                # Если прибыль больше 0.75 ATR, двигаем стоп в безубыток
+                if distance_to_stop > 0.75:
+                    new_stop = entry_price
+                    if new_stop < current_stop:
+                        return new_stop
+
+            return current_stop
+
+        except Exception as e:
+            logging.error(f"Ошибка при обновлении трейлинг-стопа: {e}")
+            return None
+
+    async def partial_close_position(self, position, current_price, atr):
+        """
+        Частично закрывает позицию при достижении тейк-профитов
+        """
+        try:
+            if not position or not current_price or not atr:
+                return None
+
+            side = position['side']
+            size = float(position['size'])
+            entry_price = float(position['entryPrice'])
+            
+            # Рассчитываем расстояние от входа в ATR
+            if side == 'Buy':
+                distance = (current_price - entry_price) / atr
+                # Закрываем 50% при достижении 1 ATR
+                if distance >= 1.0 and size > 0.5:
+                    close_size = size * 0.5
+                    return close_size
+                # Закрываем еще 25% при достижении 2 ATR
+                elif distance >= 2.0 and size > 0.25:
+                    close_size = size * 0.25
+                    return close_size
+                # Закрываем оставшиеся 25% при достижении 3 ATR
+                elif distance >= 3.0 and size > 0:
+                    close_size = size
+                    return close_size
+            else:  # Sell
+                distance = (entry_price - current_price) / atr
+                # Закрываем 50% при достижении 1 ATR
+                if distance >= 1.0 and size > 0.5:
+                    close_size = size * 0.5
+                    return close_size
+                # Закрываем еще 25% при достижении 2 ATR
+                elif distance >= 2.0 and size > 0.25:
+                    close_size = size * 0.25
+                    return close_size
+                # Закрываем оставшиеся 25% при достижении 3 ATR
+                elif distance >= 3.0 and size > 0:
+                    close_size = size
+                    return close_size
+
+            return None
+
+        except Exception as e:
+            logging.error(f"Ошибка при частичном закрытии позиции: {e}")
+            return None
+
+    async def execute_trade(self, side):
+        """
+        Выполняет торговую операцию с учетом новой стратегии
+        """
+        try:
+            # Получаем текущие индикаторы
+            indicators = await self.calculate_indicators()
+            if not indicators:
+                logging.error("Не удалось получить индикаторы")
+                return False
+
+            # Получаем текущую цену и ATR
+            current_price = float(indicators['last_close'])
+            atr = float(indicators['ATR'][-1])
+
+            # Проверяем условия входа
+            entry_conditions = await self.check_entry_conditions(indicators)
+            if not entry_conditions or entry_conditions != side:
+                logging.info(f"Условия для входа в {side} не выполнены")
+                return False
+
+            # Получаем баланс аккаунта
+            account_info = await self.api.get_wallet_balance(accountType="UNIFIED")
+            if "result" not in account_info or "list" not in account_info["result"]:
+                logging.error("Не удалось получить информацию о балансе")
+                return False
+
+            # Получаем доступный баланс USDT
+            available_balance = None
+            for coin in account_info["result"]["list"][0].get("coin", []):
+                if coin["coin"].upper() == "USDT":
+                    available_balance = float(coin["availableBalance"])
+                    break
+
+            if available_balance is None:
+                logging.error("Не удалось получить баланс USDT")
+                return False
+
+            # Рассчитываем размер позиции
+            position_size = await self.calculate_position_size(available_balance, current_price, atr)
+            if not position_size:
+                logging.error("Не удалось рассчитать размер позиции")
+                return False
+
+            # Рассчитываем стоп-лосс и тейк-профиты
+            sl_tp = await self.calculate_sl_tp(side, current_price, atr)
+            if not sl_tp:
+                logging.error("Не удалось рассчитать SL/TP")
+                return False
+
+            # Открываем позицию
+            order = await self.api.place_order(
+                category="linear",
+                symbol=SYMBOL,
+                side=side,
+                orderType="Market",
+                qty=str(position_size),
+                stopLoss=str(sl_tp['stop_loss']),
+                takeProfit=str(sl_tp['take_profit_1'])
+            )
+
+            if "result" not in order:
+                logging.error(f"Ошибка при открытии позиции: {order}")
+                return False
+
+            # Сохраняем информацию о позиции
+            position_info = {
+                'symbol': SYMBOL,
+                'side': side,
+                'size': position_size,
+                'entryPrice': current_price,
+                'stopLoss': sl_tp['stop_loss'],
+                'takeProfit1': sl_tp['take_profit_1'],
+                'takeProfit2': sl_tp['take_profit_2'],
+                'takeProfit3': sl_tp['take_profit_3'],
+                'timestamp': int(time.time() * 1000)
+            }
+
+            # Обновляем positions.json
+            positions = read_json_file('positions.json')
+            if isinstance(positions, dict):
+                positions = [positions]
+            positions.append(position_info)
+            update_json_file('positions.json', positions)
+
+            # Отправляем уведомление
+            message = f"✅ Открыта {side} позиция:\n"
+            message += f"Цена входа: {current_price}\n"
+            message += f"Размер: {position_size}\n"
+            message += f"Стоп-лосс: {sl_tp['stop_loss']}\n"
+            message += f"Тейк-профиты: {sl_tp['take_profit_1']}, {sl_tp['take_profit_2']}, {sl_tp['take_profit_3']}"
+            await send_telegram_message(message)
+
+            return True
+
+        except Exception as e:
+            logging.error(f"Ошибка при выполнении торговой операции: {e}")
+            return False
 
 def initialize_json_files():
     """Инициализирует JSON файлы с дефолтными значениями"""
     try:
+        # Инициализация balance.json
+        if not os.path.exists('balance.json'):
+            balance_data = {
+                "balance": 0,
+                "equity": 0,
+                "unrealized_pnl": 0,
+                "used_margin": 0,
+                "free_margin": 0,
+                "last_updated": datetime.now().isoformat(),
+                "details": {
+                    "USDT": 0,
+                    "USD": 0
+                }
+            }
+            update_json_file('balance.json', balance_data)
+            logging.info("✅ Создан файл balance.json")
+
+        # Инициализация indicators.json
+        if not os.path.exists('indicators.json'):
+            indicators_data = {
+                "vwap": 0,
+                "rsi": 0,
+                "atr": 0,
+                "sma": 0,
+                "support": 0,
+                "resistance": 0,
+                "last_updated": datetime.now().isoformat()
+            }
+            update_json_file('indicators.json', indicators_data)
+            logging.info("✅ Создан файл indicators.json")
+
         # Инициализация positions.json
         if not os.path.exists('positions.json'):
             positions_data = {
@@ -1863,6 +2274,15 @@ def initialize_json_files():
             update_json_file('pnl.json', pnl_data)
             logging.info("✅ Создан файл pnl.json")
 
+        # Инициализация price.json
+        if not os.path.exists('price.json'):
+            price_data = {
+                "price": 0,
+                "last_updated": datetime.now().isoformat()
+            }
+            update_json_file('price.json', price_data)
+            logging.info("✅ Создан файл price.json")
+
         # Инициализация signals.json
         if not os.path.exists('signals.json'):
             signals_data = {
@@ -1872,6 +2292,7 @@ def initialize_json_files():
             update_json_file('signals.json', signals_data)
             logging.info("✅ Создан файл signals.json")
 
+        logging.info("✅ Все JSON файлы успешно инициализированы")
         return True
     except Exception as e:
         logging.error(f"❌ Ошибка при инициализации JSON файлов: {e}")

@@ -1,0 +1,20 @@
+services:
+  - type: worker
+    name: telegram-bot
+    env: python
+    repo: https://github.com/3cryptovit/crypto_trading_bot
+    branch: main
+    plan: free
+    startCommand: python telegram.py
+    envVars:
+      - fromGroup: env_group
+
+  - type: worker
+    name: trading-bot
+    env: python
+    repo: https://github.com/3cryptovit/crypto_trading_bot
+    branch: main
+    plan: free
+    startCommand: python main.py
+    envVars:
+      - fromGroup: env_group
